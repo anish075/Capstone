@@ -5,6 +5,14 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
+# Set FFmpeg path for MoviePy
+try:
+    import imageio_ffmpeg
+    os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
+    print(f"✅ FFmpeg configured: {imageio_ffmpeg.get_ffmpeg_exe()}")
+except Exception as e:
+    print(f"⚠️ Warning: Could not configure FFmpeg: {e}")
+
 # Lazy imports to avoid startup issues
 whisper = None
 nr = None
@@ -66,6 +74,13 @@ def extract_audio_from_video(video_path):
             from moviepy.editor import VideoFileClip as VideoFileClip_class
             VideoFileClip = VideoFileClip_class
         
+        # Set FFmpeg path explicitly
+        try:
+            import imageio_ffmpeg
+            os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
+        except:
+            pass
+        
         video = VideoFileClip(video_path)
         audio_path = video_path.rsplit('.', 1)[0] + '_extracted.wav'
         video.audio.write_audiofile(audio_path, codec='pcm_s16le', verbose=False, logger=None)
@@ -73,6 +88,7 @@ def extract_audio_from_video(video_path):
         return audio_path
     except Exception as e:
         print(f"Error extracting audio: {str(e)}")
+        traceback.print_exc()
         raise
 
 def apply_noise_reduction(audio_path):
