@@ -24,12 +24,15 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuration
-UPLOAD_FOLDER = 'uploads'
+# Use absolute path for uploads folder to avoid path issues
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(SCRIPT_DIR, 'uploads')
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'm4a', 'mp4', 'avi', 'mov', 'mkv', 'webm', 'flac', 'ogg'}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+print(f"📁 Upload folder: {UPLOAD_FOLDER}")
 
 # Global model variable
 model = None
@@ -279,8 +282,14 @@ def transcribe():
         # Save uploaded file
         filename = secure_filename(file.filename)
         file_path = os.path.join(UPLOAD_FOLDER, filename)
+        print(f"💾 Saving file to: {file_path}")
         file.save(file_path)
         temp_files.append(file_path)
+        
+        # Verify file was saved
+        if not os.path.exists(file_path):
+            raise Exception(f"File was not saved correctly: {file_path}")
+        print(f"✅ File saved successfully: {os.path.getsize(file_path)} bytes")
         
         # Determine if it's a video file
         file_ext = filename.rsplit('.', 1)[1].lower()
@@ -290,19 +299,22 @@ def transcribe():
         
         # Extract audio if video
         if is_video:
-            print(f"Extracting audio from video: {filename}")
+            print(f"🎬 Extracting audio from video: {filename}")
             audio_path = extract_audio_from_video(file_path)
             temp_files.append(audio_path)
+            print(f"✅ Audio extracted to: {audio_path}")
         
         # Apply noise reduction
-        print(f"Applying noise reduction...")
+        print(f"🔇 Applying noise reduction to: {audio_path}")
         cleaned_audio_path = apply_noise_reduction(audio_path)
         if cleaned_audio_path != audio_path:
             temp_files.append(cleaned_audio_path)
+        print(f"✅ Noise reduction complete: {cleaned_audio_path}")
         
         # Transcribe audio
-        print(f"Transcribing audio...")
+        print(f"🤖 Transcribing audio: {cleaned_audio_path}")
         transcription_result = transcribe_audio(cleaned_audio_path)
+        print(f"✅ Transcription complete!")
         
         return jsonify({
             'success': True,
