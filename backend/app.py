@@ -5,11 +5,18 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 
-# Set FFmpeg path for MoviePy
+# Set FFmpeg path for MoviePy and Whisper
 try:
     import imageio_ffmpeg
-    os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
-    print(f"✅ FFmpeg configured: {imageio_ffmpeg.get_ffmpeg_exe()}")
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path
+    
+    # Add FFmpeg directory to PATH so Whisper can find it
+    ffmpeg_dir = os.path.dirname(ffmpeg_path)
+    if ffmpeg_dir not in os.environ["PATH"]:
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ["PATH"]
+    
+    print(f"✅ FFmpeg configured: {ffmpeg_path}")
 except Exception as e:
     print(f"⚠️ Warning: Could not configure FFmpeg: {e}")
 
@@ -70,25 +77,51 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def extract_audio_from_video(video_path):
-    """Extract audio from video file"""
-    global VideoFileClip
+    """Extract audio from video file using FFmpeg directly"""
     try:
-        if VideoFileClip is None:
-            from moviepy.editor import VideoFileClip as VideoFileClip_class
-            VideoFileClip = VideoFileClip_class
+        import subprocess
+        import imageio_ffmpeg
         
-        # Set FFmpeg path explicitly
-        try:
-            import imageio_ffmpeg
-            os.environ["IMAGEIO_FFMPEG_EXE"] = imageio_ffmpeg.get_ffmpeg_exe()
-        except:
-            pass
+        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        print(f"Using FFmpeg: {ffmpeg_exe}")
         
-        video = VideoFileClip(video_path)
         audio_path = video_path.rsplit('.', 1)[0] + '_extracted.wav'
-        video.audio.write_audiofile(audio_path, codec='pcm_s16le', verbose=False, logger=None)
-        video.close()
+        print(f"Extracting audio from: {video_path}")
+        print(f"Output will be: {audio_path}")
+        
+        # Use FFmpeg directly with subprocess (more reliable on Windows)
+        cmd = [
+            ffmpeg_exe,
+            '-i', video_path,           # Input file
+            '-vn',                       # No video
+            '-acodec', 'pcm_s16le',     # Audio codec
+            '-ar', '16000',              # Sample rate (Whisper likes 16kHz)
+            '-ac', '1',                  # Mono audio
+            '-y',                        # Overwrite output file
+            audio_path
+        ]
+        
+        print(f"Running command: {' '.join(cmd)}")
+        
+        # Run FFmpeg with proper Windows subprocess handling
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            print(f"FFmpeg stderr: {result.stderr}")
+            raise Exception(f"FFmpeg failed with return code {result.returncode}")
+        
+        if not os.path.exists(audio_path):
+            raise Exception(f"Audio file was not created: {audio_path}")
+        
+        print(f"✅ Audio extracted successfully: {os.path.getsize(audio_path)} bytes")
         return audio_path
+        
     except Exception as e:
         print(f"Error extracting audio: {str(e)}")
         traceback.print_exc()
@@ -124,7 +157,7 @@ def apply_noise_reduction(audio_path):
 
 def transcribe_audio(audio_path):
     """Transcribe audio using Whisper"""
-    global model, whisper
+    global model, whisper, librosa
     try:
         # Ensure model is loaded
         if model is None:
@@ -135,8 +168,17 @@ def transcribe_audio(audio_path):
             model = whisper.load_model("base")
             print("✅ Whisper model loaded successfully!")
         
+        # Load audio with librosa instead of letting Whisper use FFmpeg
+        if librosa is None:
+            import librosa as librosa_module
+            librosa = librosa_module
+        
+        # Load audio as numpy array (Whisper expects 16kHz)
+        audio_data, sr = librosa.load(audio_path, sr=16000)
+        
+        # Transcribe the audio data directly
         result = model.transcribe(
-            audio_path,
+            audio_data,
             verbose=False,
             language='en',  # Set to None for auto-detection
             task='transcribe',
