@@ -28,6 +28,8 @@ sf = None
 VideoFileClip = None
 summarizer = None
 transformers = None
+chat_model = None
+chat_tokenizer = None
 
 app = Flask(__name__)
 CORS(app)
@@ -281,6 +283,336 @@ def summarize_text(text):
         traceback.print_exc()
         raise
 
+def chat_with_transcript(transcript_text, summary_text, question, chat_history=[]):
+    """Chat with transcript using Phi-2 LLM for natural, accurate responses"""
+    global chat_model, chat_tokenizer
+    try:
+        print(f"💬 Processing question: {question}...")
+        
+        # Lazy load the chat model (Phi-2)
+        if chat_model is None:
+            print("🤖 Loading Phi-2 model (microsoft/phi-2)...")
+            print("⏳ First-time setup: downloading ~2.7GB model (this may take 3-5 minutes)...")
+            
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            import torch
+            
+            model_name = "microsoft/phi-2"
+            
+            try:
+                print("   Downloading tokenizer...")
+                chat_tokenizer = AutoTokenizer.from_pretrained(
+                    model_name,
+                    trust_remote_code=True
+                )
+                
+                print("   Downloading model...")
+                chat_model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float32,  # Use float32 for CPU
+                    device_map="cpu",
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True
+                )
+                
+                print("✅ Phi-2 model loaded successfully!")
+                
+            except Exception as model_error:
+                print(f"⚠️ Could not load Phi-2 model: {str(model_error)}")
+                print("   Falling back to rule-based assistant...")
+                # Fall back to rule-based system
+                return chat_with_transcript_fallback(transcript_text, summary_text, question, chat_history)
+        
+        # Prepare context from transcript
+        import re
+        
+        # Limit context to most relevant parts
+        max_context_length = 1500
+        context = ""
+        
+        if summary_text:
+            context = f"Summary: {summary_text}\n\n"
+        
+        # Add transcript (truncated if needed)
+        if len(transcript_text) > max_context_length:
+            context += f"Transcript excerpt: {transcript_text[:max_context_length]}..."
+        else:
+            context += f"Full transcript: {transcript_text}"
+        
+        # Build conversation history
+        history_text = ""
+        for msg in chat_history[-2:]:  # Last 2 exchanges for context
+            if msg.get('question') and msg.get('answer'):
+                history_text += f"Q: {msg['question']}\nA: {msg['answer']}\n\n"
+        
+        # Create prompt for Phi-2
+        prompt = f"""Context from a transcript:
+{context}
+
+{history_text}Question: {question}
+
+Based on the transcript context above, provide a helpful and accurate answer. If the information isn't in the transcript, say so.
+
+Answer:"""
+        
+        print(f"   Generating response with Phi-2...")
+        
+        # Tokenize input
+        inputs = chat_tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=2048
+        )
+        
+        # Generate response
+        with torch.no_grad():
+            outputs = chat_model.generate(
+                inputs.input_ids,
+                max_new_tokens=150,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True,
+                pad_token_id=chat_tokenizer.eos_token_id,
+                eos_token_id=chat_tokenizer.eos_token_id
+            )
+        
+        # Decode response
+        full_response = chat_tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract just the answer part (after "Answer:")
+        if "Answer:" in full_response:
+            answer = full_response.split("Answer:")[-1].strip()
+        else:
+            answer = full_response[len(prompt):].strip()
+        
+        # Clean up response
+        answer = answer.split("\n\n")[0]  # Take first paragraph
+        answer = answer.split("Question:")[0]  # Stop at next question
+        answer = answer.strip()
+        
+        if not answer or len(answer) < 10:
+            answer = "I apologize, but I couldn't generate a proper response. Could you rephrase your question?"
+        
+        print("✅ Response generated with Phi-2!")
+        
+        return {
+            'answer': answer,
+            'context_used': len(context),
+            'model': 'Phi-2 (Microsoft)'
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Error in Phi-2 chat: {str(e)}")
+        print("   Falling back to rule-based assistant...")
+        # Fall back to rule-based system on any error
+        return chat_with_transcript_fallback(transcript_text, summary_text, question, chat_history)
+
+
+def chat_with_transcript_fallback(transcript_text, summary_text, question, chat_history=[]):
+    """Fallback rule-based chat system (used when LLM fails)"""
+    try:
+        print(f"💬 Using fallback assistant for: {question}...")
+        
+        import re
+        from collections import Counter
+        
+        question_lower = question.lower()
+        transcript_lower = transcript_text.lower()
+        
+        # Enhanced question classification with more patterns
+        is_summary = any(word in question_lower for word in ['summarize', 'summary', 'main point', 'key point', 'overview', 'gist', 'recap'])
+        is_about = any(word in question_lower for word in ['about', 'regarding', 'concerning', 'discuss'])
+        is_mention = any(word in question_lower for word in ['mention', 'say', 'talk', 'speak'])
+        is_happen = any(word in question_lower for word in ['happen', 'occur', 'going on', 'taking place'])
+        is_explain = any(word in question_lower for word in ['explain', 'describe', 'detail'])
+        
+        # Question type detection
+        is_what = 'what' in question_lower
+        is_who = 'who' in question_lower
+        is_when = 'when' in question_lower
+        is_where = 'where' in question_lower
+        is_why = 'why' in question_lower
+        is_how = 'how' in question_lower
+        
+        # If asking for summary, return the summary
+        if is_summary:
+            if summary_text:
+                answer = f"Here's a summary of the transcript:\n\n{summary_text}\n\nWould you like me to elaborate on any specific part?"
+            else:
+                # Generate quick summary from transcript
+                sentences = re.split(r'[.!?]+', transcript_text)
+                sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
+                answer = f"The transcript covers: {'. '.join(sentences[:3])}."
+            
+            print("✅ Response generated (summary)!")
+            return {
+                'answer': answer,
+                'context_used': len(answer),
+                'model': 'Enhanced Assistant'
+            }
+        
+        # Extract keywords from question (excluding common words)
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                     'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'what', 'when',
+                     'where', 'who', 'why', 'how', 'can', 'you', 'about', 'tell', 'me', 'this',
+                     'that', 'these', 'those', 'it', 'its', 'they', 'them', 'their', 'could',
+                     'would', 'should', 'will', 'just', 'like', 'going'}
+        
+        question_words = [w for w in re.findall(r'\b[a-z]+\b', question_lower) 
+                         if w not in stop_words and len(w) > 2]
+        
+        # If no keywords, try to extract key phrases
+        if not question_words:
+            # Look for quoted text or proper nouns
+            quoted = re.findall(r'"([^"]+)"', question)
+            if quoted:
+                question_words = [quoted[0].lower()]
+            else:
+                answer = "I'd be happy to help! Could you rephrase your question to be more specific?"
+                print("✅ Response generated (clarification)!")
+                return {
+                    'answer': answer,
+                    'context_used': 0,
+                    'model': 'Enhanced Assistant'
+                }
+        
+        print(f"   Keywords: {', '.join(question_words)}")
+        
+        # Find relevant sentences with flexible matching
+        sentences = re.split(r'[.!?]+', transcript_text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 15]
+        
+        relevant_sentences = []
+        for sentence in sentences:
+            sentence_lower = sentence.lower()
+            
+            # Score based on keyword matches and context
+            score = 0
+            for word in question_words:
+                if word in sentence_lower:
+                    score += 2
+                # Also check for partial matches (word stems)
+                elif any(word[:4] in w or w[:4] in word for w in sentence_lower.split() if len(w) > 4):
+                    score += 1
+            
+            if score > 0:
+                relevant_sentences.append((score, sentence))
+        
+        # Sort by relevance
+        relevant_sentences.sort(reverse=True, key=lambda x: x[0])
+        
+        print(f"   Found {len(relevant_sentences)} relevant sentences")
+        
+        # Build answer from most relevant sentences
+        if relevant_sentences:
+            # Take top sentences based on score
+            top_sentences = [s[1] for s in relevant_sentences[:4]]
+            
+            # Create contextual response based on question type
+            if is_what:
+                if is_about or is_mention:
+                    answer = f"Regarding that topic, the transcript states: \"{top_sentences[0]}\""
+                elif is_happen or is_explain:
+                    answer = f"Here's what happened: {top_sentences[0]}"
+                else:
+                    answer = f"Based on the transcript: {top_sentences[0]}"
+            
+            elif is_who:
+                answer = f"According to the transcript: {top_sentences[0]}"
+            
+            elif is_when:
+                answer = f"The transcript mentions: {top_sentences[0]}"
+            
+            elif is_where:
+                answer = f"From the transcript: {top_sentences[0]}"
+            
+            elif is_why:
+                answer = f"The reason given is: {top_sentences[0]}"
+            
+            elif is_how:
+                answer = f"Here's how it was described: {top_sentences[0]}"
+            
+            else:
+                # Generic response
+                answer = f"{top_sentences[0]}"
+            
+            # Add additional context if available and relevant
+            if len(top_sentences) > 1 and len(answer) < 300:
+                second_sentence = top_sentences[1]
+                # Make it flow naturally
+                if not second_sentence[0].isupper():
+                    second_sentence = second_sentence[0].upper() + second_sentence[1:]
+                answer += f"\n\nAdditionally: {second_sentence}"
+            
+            # Add more context if question seems to want more detail
+            if any(word in question_lower for word in ['explain', 'detail', 'more', 'elaborate']) and len(top_sentences) > 2:
+                answer += f"\n\nFurthermore: {top_sentences[2]}"
+            
+            print("✅ Response generated (context-based)!")
+            return {
+                'answer': answer,
+                'context_used': len(answer),
+                'model': 'Enhanced Assistant'
+            }
+        
+        else:
+            # No direct match - provide helpful fallback
+            answer = f"I couldn't find specific information about '{' '.join(question_words[:3])}' in the transcript. "
+            
+            # Try to provide related information
+            if summary_text:
+                answer += f"\n\nHowever, here's what the transcript covers:\n{summary_text[:300]}"
+                if len(summary_text) > 300:
+                    answer += "..."
+            else:
+                # Show first few sentences as context
+                sentences = re.split(r'[.!?]+', transcript_text)
+                first_sentences = [s.strip() for s in sentences[:3] if len(s.strip()) > 20]
+                if first_sentences:
+                    answer += f"\n\nThe transcript discusses: {'. '.join(first_sentences)}."
+            
+            answer += "\n\nCould you rephrase your question or ask about a different aspect?"
+            
+            print("✅ Response generated (no match, with context)!")
+            return {
+                'answer': answer,
+                'context_used': len(answer),
+                'model': 'Enhanced Assistant'
+            }
+        
+    except Exception as e:
+        print(f"Error in chat: {str(e)}")
+        traceback.print_exc()
+        raise
+
+
+        assistant_marker = "<|assistant|>"
+        if assistant_marker in full_response:
+            answer = full_response.split(assistant_marker)[-1].strip()
+        else:
+            answer = full_response.split("</s>")[-1].strip()
+        
+        # Clean up the response
+        answer = answer.split("<|")[0].strip()  # Remove any following special tokens
+        answer = answer.split("User:")[0].strip()  # Stop at next user input
+        
+        if not answer:
+            answer = "I'm not sure I can answer that based on the transcript provided."
+        
+        print("✅ Response generated!")
+        
+        return {
+            'answer': answer,
+            'context_used': len(context),
+            'model': 'TinyLlama-1.1B-Chat'
+        }
+        
+    except Exception as e:
+        print(f"Error in chat: {str(e)}")
+        traceback.print_exc()
+        raise
+
 @app.route('/', methods=['GET'])
 def home():
     """Home page with server info"""
@@ -494,6 +826,47 @@ def summarize():
     except Exception as e:
         error_msg = str(e)
         print(f"Error processing summarization request: {error_msg}")
+        traceback.print_exc()
+        return jsonify({'error': error_msg}), 500
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """Chat with transcript using local LLM"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        question = data.get('question', '').strip()
+        transcript = data.get('transcript', '').strip()
+        summary = data.get('summary', '').strip()
+        chat_history = data.get('chat_history', [])
+        
+        if not question:
+            return jsonify({'error': 'No question provided'}), 400
+        
+        if not transcript:
+            return jsonify({'error': 'No transcript provided'}), 400
+        
+        print("💬 Starting chat interaction...")
+        print(f"   Question: {question[:100]}...")
+        
+        # Generate response
+        chat_result = chat_with_transcript(transcript, summary, question, chat_history)
+        
+        print(f"✅ Chat response generated!")
+        
+        return jsonify({
+            'success': True,
+            'answer': chat_result['answer'],
+            'model': chat_result['model'],
+            'context_used': chat_result['context_used']
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Error processing chat request: {error_msg}")
         traceback.print_exc()
         return jsonify({'error': error_msg}), 500
 

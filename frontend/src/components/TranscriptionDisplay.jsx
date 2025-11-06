@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import axios from 'axios';
+import ChatAssistant from './ChatAssistant';
 
 const TranscriptionDisplay = ({ transcription, onReset }) => {
   const [copied, setCopied] = useState(false);
@@ -290,6 +291,12 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
           <div className="text-gray-400 text-sm mt-2">Duration</div>
         </div>
       </motion.div>
+
+      {/* Chat Assistant */}
+      <ChatAssistant 
+        transcription={transcription.transcription} 
+        summary={summary?.summary || ''} 
+      />
     </div>
   );
 };
