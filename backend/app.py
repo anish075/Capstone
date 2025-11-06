@@ -26,6 +26,8 @@ nr = None
 librosa = None
 sf = None
 VideoFileClip = None
+summarizer = None
+transformers = None
 
 app = Flask(__name__)
 CORS(app)
@@ -201,6 +203,82 @@ def transcribe_audio(audio_path):
         }
     except Exception as e:
         print(f"Error in transcription: {str(e)}")
+        raise
+
+def summarize_text(text):
+    """Summarize text using extractive summarization (no external models needed)"""
+    try:
+        from collections import Counter
+        import re
+        
+        print("🧠 Generating extractive summary...")
+        
+        # Split into sentences
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+        
+        if len(sentences) == 0:
+            return {
+                'summary': text[:500],
+                'keywords': [],
+                'word_count': len(text.split()),
+                'summary_ratio': '1/1'
+            }
+        
+        # Score sentences based on word frequency (TF-IDF-like approach)
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
+                     'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during',
+                     'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+                     'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
+                     'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it',
+                     'we', 'they', 'what', 'which', 'who', 'when', 'where', 'why', 'how', 'just',
+                     'like', 'so', 'well', 'very', 'really', 'also', 'now', 'then', 'there'}
+        
+        # Count word frequencies
+        words = re.findall(r'\b[a-z]+\b', text.lower())
+        filtered_words = [w for w in words if w not in stop_words and len(w) > 3]
+        word_freq = Counter(filtered_words)
+        
+        # Score each sentence
+        sentence_scores = {}
+        for i, sentence in enumerate(sentences):
+            score = 0
+            sentence_words = re.findall(r'\b[a-z]+\b', sentence.lower())
+            for word in sentence_words:
+                if word in word_freq:
+                    score += word_freq[word]
+            # Normalize by sentence length
+            if len(sentence_words) > 0:
+                sentence_scores[i] = score / len(sentence_words)
+        
+        # Select top sentences (aim for 20-30% of original)
+        num_summary_sentences = max(3, min(10, len(sentences) // 4))
+        top_sentence_indices = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:num_summary_sentences]
+        
+        # Keep original order
+        top_sentence_indices.sort()
+        summary_sentences = [sentences[i] for i in top_sentence_indices]
+        combined_summary = '. '.join(summary_sentences)
+        
+        # Ensure proper ending
+        if combined_summary and combined_summary[-1] not in '.!?':
+            combined_summary += '.'
+        
+        # Extract keywords (top 10 most frequent meaningful words)
+        keywords = [word for word, _ in word_freq.most_common(10)]
+        
+        print("✅ Summarization complete!")
+        
+        return {
+            'summary': combined_summary,
+            'keywords': keywords,
+            'word_count': len(text.split()),
+            'summary_ratio': f"{len(combined_summary.split())}/{len(text.split())}"
+        }
+        
+    except Exception as e:
+        print(f"Error in summarization: {str(e)}")
+        traceback.print_exc()
         raise
 
 @app.route('/', methods=['GET'])
@@ -382,6 +460,42 @@ def transcribe():
                     os.remove(temp_file)
             except Exception as e:
                 print(f"Error deleting temp file {temp_file}: {str(e)}")
+
+@app.route('/api/summarize', methods=['POST'])
+def summarize():
+    """Summarize transcript text"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({'error': 'No text provided'}), 400
+        
+        text = data['text'].strip()
+        
+        if not text:
+            return jsonify({'error': 'Empty text provided'}), 400
+        
+        print("🧠 Starting summarization...")
+        print(f"   Input length: {len(text.split())} words")
+        
+        # Summarize the text
+        summary_result = summarize_text(text)
+        
+        print(f"✅ Summary generated: {summary_result['summary_ratio']} words")
+        
+        return jsonify({
+            'success': True,
+            'summary': summary_result['summary'],
+            'keywords': summary_result['keywords'],
+            'word_count': summary_result['word_count'],
+            'summary_ratio': summary_result['summary_ratio']
+        })
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"Error processing summarization request: {error_msg}")
+        traceback.print_exc()
+        return jsonify({'error': error_msg}), 500
 
 @app.route('/api/test', methods=['GET'])
 def test():

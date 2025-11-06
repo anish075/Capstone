@@ -1,8 +1,12 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
+import axios from 'axios';
 
 const TranscriptionDisplay = ({ transcription, onReset }) => {
   const [copied, setCopied] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [summarizing, setSummarizing] = useState(false);
+  const [summaryError, setSummaryError] = useState(null);
 
   const formatTimestamp = (seconds) => {
     const mins = Math.floor(seconds / 60);
@@ -43,6 +47,24 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
     document.body.appendChild(element);
     element.click();
     document.body.removeChild(element);
+  };
+
+  const handleSummarize = async () => {
+    setSummarizing(true);
+    setSummaryError(null);
+    
+    try {
+      const response = await axios.post('http://localhost:5000/api/summarize', {
+        text: transcription.transcription
+      });
+      
+      setSummary(response.data);
+    } catch (error) {
+      console.error('Summarization error:', error);
+      setSummaryError(error.response?.data?.error || 'Failed to generate summary');
+    } finally {
+      setSummarizing(false);
+    }
   };
 
   return (
@@ -103,7 +125,84 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
           <span className="text-xl">⏱️</span>
           With Timestamps
         </button>
+
+        <button
+          onClick={handleSummarize}
+          disabled={summarizing}
+          className="flex-1 min-w-[150px] px-6 py-3 bg-gradient-to-r from-green-600 to-teal-600 rounded-xl font-semibold hover:from-green-500 hover:to-teal-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 flex items-center justify-center gap-2"
+        >
+          <span className="text-xl">{summarizing ? '⏳' : '🧠'}</span>
+          {summarizing ? 'Summarizing...' : 'Summarize'}
+        </button>
       </motion.div>
+
+      {/* Summary Section */}
+      {summary && (
+        <motion.div
+          initial={{ opacity: 0, y: 20, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          className="glass-strong rounded-2xl p-8 mb-6 border-2 border-green-500/30"
+        >
+          <div className="flex items-center gap-3 mb-4">
+            <span className="text-3xl">🧠</span>
+            <h3 className="text-2xl font-bold bg-gradient-to-r from-green-400 to-teal-400 bg-clip-text text-transparent">
+              AI Summary
+            </h3>
+          </div>
+          
+          <div className="bg-gradient-to-br from-green-900/20 to-teal-900/20 rounded-xl p-6 mb-6">
+            <p className="text-gray-200 text-lg leading-relaxed">
+              {summary.summary}
+            </p>
+          </div>
+
+          {/* Keywords */}
+          {summary.keywords && summary.keywords.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-sm font-semibold text-gray-400 mb-3">🏷️ Key Topics</h4>
+              <div className="flex flex-wrap gap-2">
+                {summary.keywords.map((keyword, index) => (
+                  <span
+                    key={index}
+                    className="px-3 py-1 bg-gradient-to-r from-green-600/30 to-teal-600/30 rounded-full text-sm font-medium border border-green-500/30"
+                  >
+                    {keyword}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-white/10">
+            <div>
+              <div className="text-xs text-gray-500">Original Length</div>
+              <div className="text-lg font-semibold text-gray-300">{summary.word_count} words</div>
+            </div>
+            <div>
+              <div className="text-xs text-gray-500">Summary Ratio</div>
+              <div className="text-lg font-semibold text-gray-300">{summary.summary_ratio}</div>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Summary Error */}
+      {summaryError && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="glass-strong rounded-2xl p-6 mb-6 border-2 border-red-500/30"
+        >
+          <div className="flex items-center gap-3">
+            <span className="text-2xl">⚠️</span>
+            <div>
+              <h4 className="font-semibold text-red-400">Summarization Error</h4>
+              <p className="text-gray-400 text-sm mt-1">{summaryError}</p>
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* Full transcription */}
       <motion.div
