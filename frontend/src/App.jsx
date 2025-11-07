@@ -53,9 +53,25 @@ function App() {
           <h1 className="text-5xl md:text-7xl font-bold mb-4 bg-gradient-to-r from-purple-400 via-pink-400 to-blue-400 bg-clip-text text-transparent">
             🎙️ Audio Transcriber
           </h1>
-          <p className="text-gray-300 text-lg md:text-xl max-w-2xl mx-auto">
-            Upload your audio or video files for instant transcription with AI-powered noise reduction
+          <p className="text-gray-300 text-lg md:text-xl max-w-2xl mx-auto mb-4">
+            Upload your audio or video files for instant transcription with advanced AI noise reduction
           </p>
+          
+          {/* Feature badges */}
+          <div className="flex flex-wrap justify-center gap-3 mt-6">
+            <span className="px-4 py-2 glass rounded-full text-sm font-medium text-purple-300 flex items-center gap-2">
+              🤖 Whisper AI
+            </span>
+            <span className="px-4 py-2 glass rounded-full text-sm font-medium text-blue-300 flex items-center gap-2">
+              🎭 Speaker Diarization
+            </span>
+            <span className="px-4 py-2 glass rounded-full text-sm font-medium text-pink-300 flex items-center gap-2">
+              🌍 99+ Languages
+            </span>
+            <span className="px-4 py-2 glass rounded-full text-sm font-medium text-green-300 flex items-center gap-2">
+              🧠 AI Chat & Summary
+            </span>
+          </div>
         </motion.div>
 
         {/* Main content area */}

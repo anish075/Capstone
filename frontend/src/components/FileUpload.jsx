@@ -131,6 +131,14 @@ const FileUpload = ({ onTranscriptionComplete, onTranscriptionStart, onError }) 
           <p className="text-gray-400 text-sm mt-6">
             Maximum file size: 500MB
           </p>
+
+          {/* Multilingual support badge */}
+          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600/30 to-purple-600/30 border border-indigo-500/30 rounded-full">
+            <span className="text-lg">🌍</span>
+            <span className="text-sm font-medium text-indigo-200">
+              Supports 99+ Languages
+            </span>
+          </div>
         </div>
       </motion.div>
 

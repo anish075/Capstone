@@ -6,7 +6,7 @@ const ChatAssistant = ({ transcription, summary }) => {
   const [messages, setMessages] = useState([
     {
       type: 'assistant',
-      text: "👋 Hi! I'm your AI assistant. Ask me anything about the transcript!",
+      text: "👋 Hi! I'm your AI assistant powered by Google Gemini. Ask me anything about the transcript!",
       timestamp: new Date()
     }
   ]);
@@ -120,7 +120,7 @@ const ChatAssistant = ({ transcription, summary }) => {
                 <span className="text-2xl">🤖</span>
                 <div>
                   <h3 className="font-bold text-white">AI Assistant</h3>
-                  <p className="text-xs text-white/80">Chat with your transcript</p>
+                  <p className="text-xs text-white/80">Powered by Google Gemini</p>
                 </div>
               </div>
               <button

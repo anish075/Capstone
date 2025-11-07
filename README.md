@@ -7,7 +7,11 @@ A full-stack web application that transcribes audio and video files with noise r
 - 🎬 **Video/Audio Upload**: Drag-and-drop or click to upload
 - 🔇 **Noise Reduction**: Automatic noise reduction before transcription
 - 🗣️ **Speech-to-Text**: Powered by OpenAI Whisper (runs locally)
+- 🌍 **Multilingual Support**: Automatic detection and transcription of 99+ languages
+- 🎭 **Speaker Diarization**: Identifies and labels different speakers (Speaker 1, Speaker 2, etc.)
 - ⏱️ **Timestamps**: View transcription with accurate timestamps
+- 🧠 **AI Chat Assistant**: Chat with your transcript using Phi-2 LLM
+- 📝 **AI Summarization**: Get extractive summaries with key topics
 - 📋 **Copy/Download**: Easy copy to clipboard or download as text file
 - 🎨 **Futuristic UI**: Glassmorphism design with animated gradients
 
@@ -21,9 +25,13 @@ A full-stack web application that transcribes audio and video files with noise r
 
 **Backend:**
 - Flask (Python)
-- OpenAI Whisper
+- OpenAI Whisper (multilingual speech recognition)
+- Phi-2 (Microsoft 2.7B parameter LLM for chat)
+- Pyannote.audio (speaker diarization)
+- Transformers (Hugging Face)
 - MoviePy (video processing)
 - Noisereduce (audio enhancement)
+- Librosa (audio loading)
 - FFmpeg
 
 ## 📋 Prerequisites
@@ -94,9 +102,19 @@ Frontend will run on `http://localhost:3000`
 
 1. Open your browser to `http://localhost:3000`
 2. Drag and drop or click to upload an audio/video file
-3. Wait for processing (noise reduction + transcription)
-4. View transcription with timestamps
-5. Copy to clipboard or download as text file
+3. Wait for processing (noise reduction + transcription + speaker diarization)
+4. View transcription with speaker labels, timestamps, and detected language
+5. **Summarize**: Click to generate AI summary with key topics
+6. **Chat**: Use the floating chat assistant to ask questions about the transcript
+7. Copy to clipboard or download as text file
+
+### Multilingual Usage
+
+The app **automatically detects** the language being spoken:
+- No configuration needed
+- Supports 99+ languages (English, Spanish, French, German, Chinese, Japanese, Arabic, Hindi, etc.)
+- Language badge shown in UI
+- See [MULTILINGUAL_SUPPORT.md](MULTILINGUAL_SUPPORT.md) for detailed documentation
 
 ## 📁 Project Structure
 
@@ -164,4 +182,4 @@ Contributions are welcome! Feel free to submit issues or pull requests.
 
 ---
 
-Built with ❤️ using React, Tailwind CSS, Flask, and Whisper
+

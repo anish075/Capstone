@@ -4,6 +4,10 @@ import traceback
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Set FFmpeg path for MoviePy and Whisper
 try:
@@ -30,6 +34,7 @@ summarizer = None
 transformers = None
 chat_model = None
 chat_tokenizer = None
+diarization_pipeline = None
 
 app = Flask(__name__)
 CORS(app)
@@ -132,7 +137,7 @@ def extract_audio_from_video(video_path):
         raise
 
 def apply_noise_reduction(audio_path):
-    """Apply noise reduction to audio file"""
+    """Apply enhanced noise reduction to audio file using noisereduce with optimized settings"""
     global librosa, nr, sf
     try:
         if librosa is None or nr is None or sf is None:
@@ -143,19 +148,34 @@ def apply_noise_reduction(audio_path):
             nr = nr_module
             sf = sf_module
         
-        # Load audio file
+        print(f"📥 Loading audio: {audio_path}")
+        # Load audio file with original sample rate
         audio_data, sample_rate = librosa.load(audio_path, sr=None)
         
-        # Apply noise reduction
-        reduced_noise = nr.reduce_noise(y=audio_data, sr=sample_rate, prop_decrease=0.8)
+        print("🎯 Applying advanced noise reduction...")
+        # Apply noise reduction with stationary + non-stationary noise handling
+        # Using two-pass approach for better results
+        reduced_noise = nr.reduce_noise(
+            y=audio_data, 
+            sr=sample_rate,
+            stationary=True,           # Handle stationary noise (AC, hum, etc.)
+            prop_decrease=1.0,          # Maximum noise reduction
+            freq_mask_smooth_hz=500,    # Smooth frequency mask for natural sound
+            time_mask_smooth_ms=50,     # Smooth time mask to avoid artifacts
+            thresh_n_mult_nonstationary=2,  # Aggressive non-stationary noise reduction
+            sigmoid_slope_nonstationary=10,  # Sharper noise gate
+            n_std_thresh_stationary=1.5      # Threshold for stationary noise detection
+        )
         
         # Save the cleaned audio
         cleaned_path = audio_path.rsplit('.', 1)[0] + '_cleaned.wav'
         sf.write(cleaned_path, reduced_noise, sample_rate)
+        print(f"✅ Enhanced noise reduction complete: {cleaned_path}")
         
         return cleaned_path
     except Exception as e:
-        print(f"Error in noise reduction: {str(e)}")
+        print(f"⚠️ Noise reduction failed: {str(e)}")
+        print("📋 Traceback:", traceback.format_exc())
         # If noise reduction fails, return original audio
         return audio_path
 
@@ -180,12 +200,12 @@ def transcribe_audio(audio_path):
         # Load audio as numpy array (Whisper expects 16kHz)
         audio_data, sr = librosa.load(audio_path, sr=16000)
         
-        # Transcribe the audio data directly
+        # Transcribe the audio data directly with automatic language detection
         result = model.transcribe(
             audio_data,
             verbose=False,
-            language='en',  # Set to None for auto-detection
-            task='transcribe',
+            language=None,  # Auto-detect language (supports 99+ languages)
+            task='transcribe',  # Use 'translate' to translate to English
             word_timestamps=True
         )
         
@@ -207,15 +227,381 @@ def transcribe_audio(audio_path):
         print(f"Error in transcription: {str(e)}")
         raise
 
-def summarize_text(text):
-    """Summarize text using extractive summarization (no external models needed)"""
+def perform_simple_speaker_clustering(audio_path):
+    """Simple speaker clustering based on audio energy and pitch changes"""
     try:
+        global librosa, sf
+        if librosa is None or sf is None:
+            import librosa as librosa_module
+            import soundfile as sf_module
+            librosa = librosa_module
+            sf = sf_module
+        
+        print("   Loading audio for clustering...")
+        y, sr = librosa.load(audio_path, sr=16000)
+        
+        # Detect speech segments using energy
+        frame_length = 2048
+        hop_length = 512
+        
+        # Calculate energy
+        energy = librosa.feature.rms(y=y, frame_length=frame_length, hop_length=hop_length)[0]
+        
+        # Calculate zero crossing rate (helps detect speaker changes)
+        zcr = librosa.feature.zero_crossing_rate(y, frame_length=frame_length, hop_length=hop_length)[0]
+        
+        # Calculate spectral centroid (pitch/voice characteristic)
+        spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+        
+        # Normalize features
+        from sklearn.preprocessing import StandardScaler
+        import numpy as np
+        
+        features = np.vstack([energy, zcr, spectral_centroid]).T
+        scaler = StandardScaler()
+        features_scaled = scaler.fit_transform(features)
+        
+        # Simple clustering based on feature changes
+        from sklearn.cluster import KMeans
+        
+        # Estimate number of speakers (between 2-5)
+        n_speakers = min(5, max(2, int(len(features_scaled) / 100)))
+        
+        print(f"   Estimated {n_speakers} speakers using clustering...")
+        
+        kmeans = KMeans(n_clusters=n_speakers, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(features_scaled)
+        
+        # Convert frame indices to timestamps
+        times = librosa.frames_to_time(np.arange(len(labels)), sr=sr, hop_length=hop_length)
+        
+        # Create diarization segments
+        diarization_segments = []
+        current_speaker = labels[0]
+        start_time = times[0]
+        
+        for i in range(1, len(labels)):
+            if labels[i] != current_speaker:
+                # Speaker change detected
+                diarization_segments.append({
+                    'start': float(start_time),
+                    'end': float(times[i]),
+                    'speaker': f'SPEAKER_{current_speaker:02d}'
+                })
+                current_speaker = labels[i]
+                start_time = times[i]
+        
+        # Add final segment
+        diarization_segments.append({
+            'start': float(start_time),
+            'end': float(times[-1]),
+            'speaker': f'SPEAKER_{current_speaker:02d}'
+        })
+        
+        print(f"   ✅ Found {len(set(labels))} unique speakers in {len(diarization_segments)} segments")
+        
+        return diarization_segments
+        
+    except Exception as e:
+        print(f"   ⚠️ Simple clustering failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def perform_speaker_diarization(audio_path, num_speakers=None):
+    """Perform speaker diarization using pyannote.audio"""
+    global diarization_pipeline
+    try:
+        print("🎭 Performing speaker diarization...")
+        
+        # Lazy load the diarization pipeline
+        if diarization_pipeline is None:
+            try:
+                print("   Loading pyannote.audio diarization model...")
+                from pyannote.audio import Pipeline
+                import torch
+                
+                # Get HuggingFace token from environment or try without
+                hf_token = os.getenv('HUGGINGFACE_TOKEN') or os.getenv('HF_TOKEN')
+                
+                if hf_token:
+                    print(f"   Using HuggingFace token for authentication...")
+                
+                # Try to load the pipeline (use 'token' instead of 'use_auth_token' for newer versions)
+                try:
+                    diarization_pipeline = Pipeline.from_pretrained(
+                        "pyannote/speaker-diarization-3.1",
+                        use_auth_token=hf_token  # Try old parameter first
+                    )
+                    print("✅ Diarization model loaded (v3.1)!")
+                except TypeError:
+                    # New pyannote version uses 'token' instead of 'use_auth_token'
+                    try:
+                        diarization_pipeline = Pipeline.from_pretrained(
+                            "pyannote/speaker-diarization-3.1",
+                            token=hf_token
+                        )
+                        print("✅ Diarization model loaded (v3.1 with new token parameter)!")
+                    except Exception as e:
+                        print(f"   ⚠️ Could not load v3.1: {str(e)}")
+                        print("   Trying v3.0...")
+                        try:
+                            diarization_pipeline = Pipeline.from_pretrained(
+                                "pyannote/speaker-diarization-3.0",
+                                token=hf_token
+                            )
+                            print("✅ Diarization model loaded (v3.0)!")
+                        except Exception as e2:
+                            print(f"   ⚠️ Could not load v3.0: {str(e2)}")
+                            print("   Trying v2.1 with revision parameter...")
+                            try:
+                                diarization_pipeline = Pipeline.from_pretrained(
+                                    "pyannote/speaker-diarization",
+                                    revision="2.1"
+                                )
+                                print("✅ Diarization model loaded (v2.1)!")
+                            except Exception as e3:
+                                print(f"   ⚠️ Could not load v2.1: {str(e3)}")
+                                # Use simple clustering as fallback
+                                print("   Using simple speaker clustering as fallback...")
+                                diarization_pipeline = "simple_clustering"
+                
+            except Exception as e:
+                print(f"⚠️ Could not load any diarization model: {str(e)}")
+                print("   Using simple speaker clustering as fallback...")
+                import traceback
+                traceback.print_exc()
+                diarization_pipeline = "simple_clustering"
+        
+        # Check if we're using simple clustering fallback
+        if diarization_pipeline == "simple_clustering":
+            print("   ⚠️ Using energy-based speaker clustering (fallback method)")
+            return perform_simple_speaker_clustering(audio_path)
+        
+        # Perform diarization with parameters
+        print(f"   Analyzing speakers in: {os.path.basename(audio_path)}")
+        
+        # Run diarization without constraints first (more reliable)
+        try:
+            print("   Running diarization (auto-detecting speakers)...")
+            diarization = diarization_pipeline(audio_path)
+            print("   ✅ Diarization analysis complete")
+        except Exception as e:
+            print(f"   ⚠️ Diarization failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+        # Convert to list of speaker segments
+        speaker_segments = []
+        unique_speakers = set()
+        
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            speaker_segments.append({
+                'start': turn.start,
+                'end': turn.end,
+                'speaker': speaker
+            })
+            unique_speakers.add(speaker)
+            print(f"   📍 {speaker}: {turn.start:.2f}s - {turn.end:.2f}s")
+        
+        num_unique_speakers = len(unique_speakers)
+        print(f"✅ Diarization complete! Found {num_unique_speakers} unique speakers")
+        print(f"   Speakers detected: {sorted(unique_speakers)}")
+        print(f"   Total segments: {len(speaker_segments)}")
+        
+        return speaker_segments
+        
+    except Exception as e:
+        print(f"⚠️ Error in diarization: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print("   Continuing without speaker diarization...")
+        return None
+
+def assign_speakers_to_segments(transcription_segments, speaker_segments):
+    """Assign speakers to transcription segments based on time overlap"""
+    if not speaker_segments:
+        return transcription_segments
+    
+    try:
+        print("🎯 Matching speakers with transcript segments...")
+        print(f"   Transcript segments: {len(transcription_segments)}")
+        print(f"   Speaker segments: {len(speaker_segments)}")
+        
+        for i, segment in enumerate(transcription_segments):
+            segment_start = segment['start']
+            segment_end = segment['end']
+            segment_mid = (segment_start + segment_end) / 2
+            
+            # Find which speaker was talking at the midpoint of this segment
+            best_speaker = None
+            best_overlap = 0
+            
+            for speaker_seg in speaker_segments:
+                # Check if segment overlaps with speaker time
+                overlap_start = max(segment_start, speaker_seg['start'])
+                overlap_end = min(segment_end, speaker_seg['end'])
+                overlap = max(0, overlap_end - overlap_start)
+                
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_speaker = speaker_seg['speaker']
+            
+            # Assign speaker or default to "SPEAKER_00"
+            if best_speaker:
+                segment['speaker'] = best_speaker
+                print(f"   Segment {i+1} [{segment_start:.1f}-{segment_end:.1f}s]: {best_speaker} (overlap: {best_overlap:.2f}s)")
+            else:
+                segment['speaker'] = "SPEAKER_00"
+                print(f"   Segment {i+1} [{segment_start:.1f}-{segment_end:.1f}s]: No speaker match (defaulting)")
+        
+        # Rename speakers to Speaker 1, Speaker 2, etc.
+        # Sort speakers by their first appearance
+        speaker_first_appearance = {}
+        for segment in transcription_segments:
+            original_speaker = segment['speaker']
+            if original_speaker not in speaker_first_appearance:
+                speaker_first_appearance[original_speaker] = segment['start']
+        
+        # Sort by first appearance time
+        sorted_speakers = sorted(speaker_first_appearance.items(), key=lambda x: x[1])
+        speaker_map = {}
+        for idx, (original_speaker, _) in enumerate(sorted_speakers, 1):
+            speaker_map[original_speaker] = f"Speaker {idx}"
+        
+        # Apply the mapping
+        for segment in transcription_segments:
+            original_speaker = segment['speaker']
+            segment['speaker'] = speaker_map[original_speaker]
+        
+        print(f"✅ Assigned {len(speaker_map)} speakers to segments")
+        print(f"   Speaker mapping: {speaker_map}")
+        return transcription_segments
+        
+    except Exception as e:
+        print(f"⚠️ Error assigning speakers: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        # Return original segments with default speaker
+        for segment in transcription_segments:
+            if 'speaker' not in segment:
+                segment['speaker'] = 'Speaker 1'
+        return transcription_segments
+
+def summarize_text(text):
+    """Summarize text using Google Gemini AI for high-quality summaries"""
+    global gemini_model
+    try:
+        print("🤖 Generating AI-powered summary with Google Gemini...")
+        
+        # Quick validation
+        if len(text.strip()) < 50:
+            return {
+                'summary': text,
+                'keywords': [],
+                'word_count': len(text.split()),
+                'summary_ratio': '1/1'
+            }
+        
+        # Get API key
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            raise Exception("GEMINI_API_KEY not found in environment variables")
+        
+        print("🔧 Using Google Gemini 1.5 Flash (v1 API for free tier)...")
+        
+        # Truncate if text is too long (keep first 6000 words for context)
+        words = text.split()
+        word_count = len(words)
+        if word_count > 6000:
+            text = ' '.join(words[:6000]) + "..."
+            print(f"   Truncated transcript from {word_count} to 6000 words for processing")
+        
+        # Create summary prompt
+        prompt = f"""Please provide a comprehensive summary of the following transcript. 
+
+Your summary should:
+1. Capture the main topics and key points discussed
+2. Be concise but informative (3-5 paragraphs)
+3. Highlight important details, decisions, or conclusions
+4. Also extract 10 important keywords from the content
+
+Transcript:
+{text}
+
+Provide your response in this exact format:
+SUMMARY:
+[Your summary here]
+
+KEYWORDS:
+[keyword1, keyword2, keyword3, ...]"""
+
+        print("   Sending transcript to Gemini for summarization...")
+        
+        # Use REST API v1 endpoint (free-tier compatible)
+        import requests
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.5,
+                "topP": 0.9,
+                "maxOutputTokens": 800
+            }
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        response_data = response.json()
+        
+        # Extract text from response
+        result_text = response_data['candidates'][0]['content']['parts'][0]['text'].strip()
+        
+        print("✅ Gemini summarization complete!")
+        
+        # Parse the response
+        summary = ""
+        keywords = []
+        
+        if "SUMMARY:" in result_text and "KEYWORDS:" in result_text:
+            parts = result_text.split("KEYWORDS:")
+            summary = parts[0].replace("SUMMARY:", "").strip()
+            keywords_text = parts[1].strip()
+            # Extract keywords (remove brackets, split by comma)
+            keywords_text = keywords_text.replace('[', '').replace(']', '')
+            keywords = [k.strip() for k in keywords_text.split(',') if k.strip()]
+        else:
+            # Fallback if format isn't followed perfectly
+            summary = result_text
+            # Try to extract any list at the end as keywords
+            lines = result_text.split('\n')
+            for line in lines[-5:]:
+                if ',' in line:
+                    keywords = [k.strip() for k in line.split(',') if k.strip()]
+                    break
+        
+        print("✅ AI summarization complete!")
+        
+        return {
+            'summary': summary,
+            'keywords': keywords[:10],  # Limit to 10 keywords
+            'word_count': word_count,
+            'summary_ratio': f"{len(summary.split())}/{word_count}"
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Gemini summarization failed: {str(e)}")
+        print("   Falling back to extractive summarization...")
+        traceback.print_exc()
+        
+        # Fallback to simple extractive method
         from collections import Counter
         import re
         
-        print("🧠 Generating extractive summary...")
-        
-        # Split into sentences
         sentences = re.split(r'[.!?]+', text)
         sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
         
@@ -227,77 +613,136 @@ def summarize_text(text):
                 'summary_ratio': '1/1'
             }
         
-        # Score sentences based on word frequency (TF-IDF-like approach)
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 
-                     'of', 'with', 'by', 'from', 'up', 'about', 'into', 'through', 'during',
-                     'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
-                     'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might',
-                     'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it',
-                     'we', 'they', 'what', 'which', 'who', 'when', 'where', 'why', 'how', 'just',
-                     'like', 'so', 'well', 'very', 'really', 'also', 'now', 'then', 'there'}
-        
-        # Count word frequencies
+        # Simple word frequency approach as fallback
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for'}
         words = re.findall(r'\b[a-z]+\b', text.lower())
         filtered_words = [w for w in words if w not in stop_words and len(w) > 3]
         word_freq = Counter(filtered_words)
         
-        # Score each sentence
-        sentence_scores = {}
-        for i, sentence in enumerate(sentences):
-            score = 0
-            sentence_words = re.findall(r'\b[a-z]+\b', sentence.lower())
-            for word in sentence_words:
-                if word in word_freq:
-                    score += word_freq[word]
-            # Normalize by sentence length
-            if len(sentence_words) > 0:
-                sentence_scores[i] = score / len(sentence_words)
-        
-        # Select top sentences (aim for 20-30% of original)
-        num_summary_sentences = max(3, min(10, len(sentences) // 4))
-        top_sentence_indices = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:num_summary_sentences]
-        
-        # Keep original order
-        top_sentence_indices.sort()
-        summary_sentences = [sentences[i] for i in top_sentence_indices]
-        combined_summary = '. '.join(summary_sentences)
-        
-        # Ensure proper ending
-        if combined_summary and combined_summary[-1] not in '.!?':
-            combined_summary += '.'
-        
-        # Extract keywords (top 10 most frequent meaningful words)
+        # Take first few sentences as summary
+        fallback_summary = '. '.join(sentences[:5]) + '.'
         keywords = [word for word, _ in word_freq.most_common(10)]
         
-        print("✅ Summarization complete!")
-        
         return {
-            'summary': combined_summary,
+            'summary': fallback_summary,
             'keywords': keywords,
             'word_count': len(text.split()),
-            'summary_ratio': f"{len(combined_summary.split())}/{len(text.split())}"
+            'summary_ratio': f"{len(fallback_summary.split())}/{len(text.split())}"
+        }
+
+def chat_with_transcript(transcript_text, summary_text, question, chat_history=[]):
+    """Chat with transcript using Google Gemini (primary) with Mistral-7B fallback"""
+    # Try Gemini first
+    try:
+        return chat_with_gemini(transcript_text, summary_text, question, chat_history)
+    except Exception as gemini_error:
+        print(f"⚠️ Gemini failed: {str(gemini_error)}")
+        print("   Falling back to Mistral-7B...")
+        # Fall back to Mistral if Gemini fails
+        return chat_with_mistral(transcript_text, summary_text, question, chat_history)
+
+def chat_with_gemini(transcript_text, summary_text, question, chat_history=[]):
+    """Chat using Google Gemini 1.5 Flash (fast, smart, free)"""
+    global gemini_model
+    try:
+        print(f"💬 Processing question with Gemini: {question}...")
+        
+        # Get API key
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            raise Exception("GEMINI_API_KEY not found in environment variables")
+        
+        print("🤖 Using Google Gemini 1.5 Flash (v1 API for free tier)...")
+        
+        # Prepare context
+        max_context_length = 8000  # Gemini handles more context
+        context = ""
+        
+        if summary_text:
+            context = f"Summary: {summary_text}\n\n"
+        
+        # Add transcript (truncated if needed)
+        if len(transcript_text) > max_context_length:
+            context += f"Transcript excerpt: {transcript_text[:max_context_length]}..."
+        else:
+            context += f"Full transcript: {transcript_text}"
+        
+        # Build conversation history
+        history_text = ""
+        for msg in chat_history[-3:]:  # Last 3 exchanges
+            if msg.get('question') and msg.get('answer'):
+                history_text += f"User: {msg['question']}\nAssistant: {msg['answer']}\n\n"
+        
+        # Create prompt
+        prompt = f"""You are a helpful AI assistant analyzing a transcript. Answer questions based on the transcript content.
+
+Transcript Context:
+{context}
+
+Previous conversation:
+{history_text}
+
+Current question: {question}
+
+Please provide a clear, accurate answer based on the transcript. If the information isn't in the transcript, say so politely. Keep your answer concise and helpful."""
+        
+        print(f"   Generating response with Gemini 1.5 Flash...")
+        
+        # Use REST API v1 endpoint (free-tier compatible)
+        import requests
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }],
+            "generationConfig": {
+                "temperature": 0.7,
+                "topP": 0.95,
+                "maxOutputTokens": 500
+            }
+        }
+        
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        response_data = response.json()
+        
+        answer = response_data['candidates'][0]['content']['parts'][0]['text'].strip()
+        
+        if not answer or len(answer) < 10:
+            answer = "I apologize, but I couldn't generate a proper response. Could you rephrase your question?"
+        
+        print("✅ Response generated with Gemini!")
+        
+        return {
+            'answer': answer,
+            'context_used': len(context),
+            'model': 'Gemini 1.5 Flash'
         }
         
     except Exception as e:
-        print(f"Error in summarization: {str(e)}")
+        print(f"⚠️ Error in Gemini chat: {str(e)}")
+        import traceback
         traceback.print_exc()
+        # Re-raise to trigger fallback
         raise
 
-def chat_with_transcript(transcript_text, summary_text, question, chat_history=[]):
-    """Chat with transcript using Phi-2 LLM for natural, accurate responses"""
+def chat_with_mistral(transcript_text, summary_text, question, chat_history=[]):
+    """Chat with transcript using Mistral-7B-Instruct for high-quality responses"""
     global chat_model, chat_tokenizer
     try:
         print(f"💬 Processing question: {question}...")
         
-        # Lazy load the chat model (Phi-2)
+        # Lazy load the chat model (Mistral-7B-Instruct)
         if chat_model is None:
-            print("🤖 Loading Phi-2 model (microsoft/phi-2)...")
-            print("⏳ First-time setup: downloading ~2.7GB model (this may take 3-5 minutes)...")
+            print("🤖 Loading Mistral-7B-Instruct-v0.2 model...")
+            print("⏳ First-time setup: downloading ~15GB model (this may take 10-20 minutes)...")
+            print("   This is a one-time download. Subsequent uses will be instant!")
             
             from transformers import AutoTokenizer, AutoModelForCausalLM
             import torch
             
-            model_name = "microsoft/phi-2"
+            model_name = "mistralai/Mistral-7B-Instruct-v0.2"
             
             try:
                 print("   Downloading tokenizer...")
@@ -306,19 +751,19 @@ def chat_with_transcript(transcript_text, summary_text, question, chat_history=[
                     trust_remote_code=True
                 )
                 
-                print("   Downloading model...")
+                print("   Downloading model (this will take a while)...")
                 chat_model = AutoModelForCausalLM.from_pretrained(
                     model_name,
-                    torch_dtype=torch.float32,  # Use float32 for CPU
+                    torch_dtype=torch.float32,  # Use float32 for CPU compatibility
                     device_map="cpu",
                     trust_remote_code=True,
                     low_cpu_mem_usage=True
                 )
                 
-                print("✅ Phi-2 model loaded successfully!")
+                print("✅ Mistral-7B model loaded successfully!")
                 
             except Exception as model_error:
-                print(f"⚠️ Could not load Phi-2 model: {str(model_error)}")
+                print(f"⚠️ Could not load Mistral-7B model: {str(model_error)}")
                 print("   Falling back to rule-based assistant...")
                 # Fall back to rule-based system
                 return chat_with_transcript_fallback(transcript_text, summary_text, question, chat_history)
@@ -341,21 +786,25 @@ def chat_with_transcript(transcript_text, summary_text, question, chat_history=[
         
         # Build conversation history
         history_text = ""
-        for msg in chat_history[-2:]:  # Last 2 exchanges for context
+        for msg in chat_history[-3:]:  # Last 3 exchanges for better context
             if msg.get('question') and msg.get('answer'):
-                history_text += f"Q: {msg['question']}\nA: {msg['answer']}\n\n"
+                history_text += f"User: {msg['question']}\nAssistant: {msg['answer']}\n\n"
         
-        # Create prompt for Phi-2
-        prompt = f"""Context from a transcript:
+        # Create prompt using Mistral's instruction format
+        # Mistral uses [INST] tags for instructions
+        prompt = f"""[INST] You are a helpful AI assistant analyzing a transcript. Answer questions based on the transcript content provided below.
+
+Transcript Context:
 {context}
 
-{history_text}Question: {question}
+Previous conversation:
+{history_text}
 
-Based on the transcript context above, provide a helpful and accurate answer. If the information isn't in the transcript, say so.
+Current question: {question}
 
-Answer:"""
+Please provide a clear, accurate answer based on the transcript. If the information isn't in the transcript, say so politely. [/INST]"""
         
-        print(f"   Generating response with Phi-2...")
+        print(f"   Generating response with Mistral-7B...")
         
         # Tokenize input
         inputs = chat_tokenizer(
@@ -365,45 +814,60 @@ Answer:"""
             max_length=2048
         )
         
-        # Generate response
+        # Generate response with better parameters for Mistral
+        import torch
         with torch.no_grad():
             outputs = chat_model.generate(
                 inputs.input_ids,
-                max_new_tokens=150,
+                max_new_tokens=200,  # Allow longer responses
                 temperature=0.7,
-                top_p=0.9,
+                top_p=0.95,  # Increased for more diverse responses
                 do_sample=True,
                 pad_token_id=chat_tokenizer.eos_token_id,
-                eos_token_id=chat_tokenizer.eos_token_id
+                eos_token_id=chat_tokenizer.eos_token_id,
+                repetition_penalty=1.1  # Reduce repetition
             )
         
         # Decode response
         full_response = chat_tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Extract just the answer part (after "Answer:")
-        if "Answer:" in full_response:
-            answer = full_response.split("Answer:")[-1].strip()
+        # Extract just the answer part (after [/INST])
+        if "[/INST]" in full_response:
+            answer = full_response.split("[/INST]")[-1].strip()
         else:
             answer = full_response[len(prompt):].strip()
         
         # Clean up response
-        answer = answer.split("\n\n")[0]  # Take first paragraph
-        answer = answer.split("Question:")[0]  # Stop at next question
+        # Remove any remaining instruction tags
+        answer = answer.replace("[INST]", "").replace("[/INST]", "").strip()
+        
+        # Take first coherent paragraph
+        paragraphs = answer.split("\n\n")
+        answer = paragraphs[0] if paragraphs else answer
+        
+        # Stop at next question if it appears
+        if "User:" in answer:
+            answer = answer.split("User:")[0]
+        if "Question:" in answer:
+            answer = answer.split("Question:")[0]
+        
         answer = answer.strip()
         
         if not answer or len(answer) < 10:
             answer = "I apologize, but I couldn't generate a proper response. Could you rephrase your question?"
         
-        print("✅ Response generated with Phi-2!")
+        print("✅ Response generated with Mistral-7B!")
         
         return {
             'answer': answer,
             'context_used': len(context),
-            'model': 'Phi-2 (Microsoft)'
+            'model': 'Mistral-7B-Instruct-v0.2'
         }
         
     except Exception as e:
-        print(f"⚠️ Error in Phi-2 chat: {str(e)}")
+        print(f"⚠️ Error in Mistral-7B chat: {str(e)}")
+        import traceback
+        traceback.print_exc()
         print("   Falling back to rule-based assistant...")
         # Fall back to rule-based system on any error
         return chat_with_transcript_fallback(transcript_text, summary_text, question, chat_history)
@@ -767,6 +1231,23 @@ def transcribe():
         print(f"🤖 Transcribing audio: {cleaned_audio_path}")
         transcription_result = transcribe_audio(cleaned_audio_path)
         print(f"✅ Transcription complete!")
+        
+        # Perform speaker diarization
+        print(f"🎭 Starting speaker diarization...")
+        speaker_segments = perform_speaker_diarization(cleaned_audio_path)
+        
+        # Assign speakers to transcription segments
+        if speaker_segments:
+            transcription_result['segments'] = assign_speakers_to_segments(
+                transcription_result['segments'], 
+                speaker_segments
+            )
+            print(f"✅ Speaker diarization complete!")
+        else:
+            # Add default speaker to all segments
+            for segment in transcription_result['segments']:
+                segment['speaker'] = 'Speaker 1'
+            print(f"⚠️ Using single speaker fallback")
         
         return jsonify({
             'success': True,

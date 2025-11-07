@@ -81,9 +81,15 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
             <span className="text-4xl">✅</span>
             <div>
               <h2 className="text-2xl font-bold text-green-400">Transcription Complete</h2>
-              <p className="text-gray-400 text-sm mt-1">
-                File: {transcription.filename} • Language: {transcription.language.toUpperCase()}
-              </p>
+              <div className="flex items-center gap-3 mt-1">
+                <p className="text-gray-400 text-sm">
+                  File: {transcription.filename}
+                </p>
+                <span className="text-gray-500">•</span>
+                <span className="px-3 py-1 bg-gradient-to-r from-indigo-600/40 to-purple-600/40 border border-indigo-500/50 rounded-full text-xs font-semibold text-indigo-200 flex items-center gap-2">
+                  🌍 {transcription.language.toUpperCase()}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -136,6 +142,29 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
           {summarizing ? 'Summarizing...' : 'Summarize'}
         </button>
       </motion.div>
+
+      {/* Multilingual Support Info */}
+      {transcription.language && transcription.language !== 'en' && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="glass-strong rounded-xl p-4 mb-6 border border-indigo-500/30"
+        >
+          <div className="flex items-start gap-3">
+            <span className="text-2xl">🌍</span>
+            <div className="flex-1">
+              <h4 className="font-semibold text-indigo-300 mb-1">
+                Multilingual Transcription Detected
+              </h4>
+              <p className="text-sm text-gray-400">
+                Whisper AI automatically detected <span className="text-indigo-300 font-semibold">{transcription.language.toUpperCase()}</span> language. 
+                Supports 99+ languages including English, Spanish, French, German, Chinese, Japanese, Arabic, Hindi, and more!
+              </p>
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* Summary Section */}
       {summary && (
@@ -230,36 +259,54 @@ const TranscriptionDisplay = ({ transcription, onReset }) => {
         className="glass-strong rounded-2xl p-8"
       >
         <h3 className="text-xl font-bold mb-6 bg-gradient-to-r from-purple-400 to-blue-400 bg-clip-text text-transparent">
-          ⏱️ Timestamped Segments
+          🎭 Speaker-Separated Transcript
         </h3>
         
         <div className="space-y-4 max-h-[600px] overflow-y-auto pr-4">
-          {transcription.segments.map((segment, index) => (
-            <motion.div
-              key={index}
-              initial={{ opacity: 0, x: -20 }}
-              animate={{ opacity: 1, x: 0 }}
-              transition={{ delay: 0.4 + index * 0.05 }}
-              className="glass rounded-xl p-4 hover:bg-white/10 transition-all duration-300"
-            >
-              <div className="flex items-start gap-4">
-                <div className="flex-shrink-0">
-                  <div className="px-3 py-1 bg-purple-600/30 rounded-lg text-sm font-mono">
-                    {formatTimestamp(segment.start)}
+          {transcription.segments.map((segment, index) => {
+            // Get speaker color based on speaker number
+            const speakerNum = segment.speaker ? parseInt(segment.speaker.split(' ')[1] || '1') : 1;
+            const speakerColors = [
+              { bg: 'bg-purple-600/30', text: 'text-purple-300', border: 'border-purple-500/50' },
+              { bg: 'bg-blue-600/30', text: 'text-blue-300', border: 'border-blue-500/50' },
+              { bg: 'bg-green-600/30', text: 'text-green-300', border: 'border-green-500/50' },
+              { bg: 'bg-pink-600/30', text: 'text-pink-300', border: 'border-pink-500/50' },
+              { bg: 'bg-orange-600/30', text: 'text-orange-300', border: 'border-orange-500/50' },
+            ];
+            const colors = speakerColors[(speakerNum - 1) % speakerColors.length];
+            
+            return (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: 0.4 + index * 0.05 }}
+                className={`glass rounded-xl p-4 hover:bg-white/10 transition-all duration-300 border-l-4 ${colors.border}`}
+              >
+                <div className="flex items-start gap-4">
+                  <div className="flex-shrink-0">
+                    <div className="px-3 py-1 bg-purple-600/30 rounded-lg text-sm font-mono">
+                      {formatTimestamp(segment.start)}
+                    </div>
+                    <div className="text-center text-xs text-gray-500 mt-1">to</div>
+                    <div className="px-3 py-1 bg-blue-600/30 rounded-lg text-sm font-mono">
+                      {formatTimestamp(segment.end)}
+                    </div>
+                    {segment.speaker && (
+                      <div className={`mt-2 px-2 py-1 ${colors.bg} rounded-lg text-xs font-semibold ${colors.text} text-center`}>
+                        🎤 {segment.speaker}
+                      </div>
+                    )}
                   </div>
-                  <div className="text-center text-xs text-gray-500 mt-1">to</div>
-                  <div className="px-3 py-1 bg-blue-600/30 rounded-lg text-sm font-mono">
-                    {formatTimestamp(segment.end)}
+                  <div className="flex-1">
+                    <p className="text-gray-200 leading-relaxed">
+                      {segment.text}
+                    </p>
                   </div>
                 </div>
-                <div className="flex-1">
-                  <p className="text-gray-200 leading-relaxed">
-                    {segment.text}
-                  </p>
-                </div>
-              </div>
-            </motion.div>
-          ))}
+              </motion.div>
+            );
+          })}
         </div>
       </motion.div>
 
